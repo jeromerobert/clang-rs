@@ -49,6 +49,9 @@ use clang_sys::*;
 
 use libc::{c_int, c_uint, c_ulong};
 
+#[cfg(feature="clang_17_0")]
+use libc::c_uchar;
+
 use completion::{Completer, CompletionString};
 use diagnostic::{Diagnostic};
 use documentation::{Comment};
@@ -169,6 +172,21 @@ impl CallingConvention {
             _ => None,
         }
     }
+}
+
+// Choice ________________________________________
+
+/// Indicates if an option should be enabled or disabled.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[repr(C)]
+#[cfg(feature = "clang_17_0")]
+pub enum Choice {
+    /// Use the default value of an option.
+    Default = 0,
+    /// Enable the option.
+    Enabled = 1,
+    /// Disable the option.
+    Disabled = 2,
 }
 
 // EntityKind ____________________________________
@@ -644,7 +662,7 @@ pub enum EntityKind {
     /// Only produced by `libclang` 10.0 and later.
     OmpParallelMasterDirective = 285,
     /// The top-level AST entity which acts as the root for the other entitys.
-    TranslationUnit = 300,
+    TranslationUnit = if cfg!(feature="clang_16_0") { 350 } else { 300 },
     /// An attribute whose specific kind is not exposed via this interface.
     UnexposedAttr = 400,
     /// An attribute applied to an Objective-C IBAction.
@@ -809,7 +827,7 @@ pub enum EntityKind {
 impl EntityKind {
     fn from_raw(raw: c_int) -> Option<Self> {
         match raw {
-            1..=50 | 70..=73 | 100..=149 | 200..=280 | 300 | 400..=441 | 500..=503 | 600..=603
+            1..=50 | 70..=73 | 100..=149 | 200..=280 | 300 | 350 | 400..=441 | 500..=503 | 600..=603
             | 700 => {
                 Some(unsafe { mem::transmute(raw) })
             }
@@ -2437,6 +2455,12 @@ impl<'tu> Entity<'tu> {
         unsafe { clang_Cursor_isDynamicCall(self.raw) != 0 }
     }
 
+    /// Returns whether this AST entity is a constructor or conversion method declared explicit.
+    #[cfg(feature="clang_17_0")]
+    pub fn is_explicit(&self) -> bool {
+        unsafe { clang_CXXMethod_isExplicit(self.raw) != 0 }
+    }
+
     /// Returns whether this AST entity is a function-like macro.
     #[cfg(feature="clang_3_9")]
     pub fn is_function_like_macro(&self) -> bool {
@@ -2670,6 +2694,14 @@ impl<'c> Index<'c> {
         unsafe { Index::from_ptr(clang_createIndex(exclude as c_int, diagnostics as c_int)) }
     }
 
+    /// Constructs a new `Index` with options.
+    ///
+    /// `options` determines the options associated with the newly created `Index`.
+    #[cfg(feature="clang_17_0")]
+    pub fn new_with_options(_: &'c Clang, options: &IndexOptions) -> Index<'c> {
+        unsafe { Index::from_ptr(clang_createIndexWithOptions(options.as_raw())) }
+    }
+
     //- Accessors --------------------------------
 
     /// Returns a parser for the supplied file.
@@ -2708,6 +2740,82 @@ impl<'c> fmt::Debug for Index<'c> {
         formatter.debug_struct("Index")
             .field("thread_options", &self.get_thread_options())
             .finish()
+    }
+}
+
+// IndexOptions __________________________________
+
+/// Options to explicitly initialize an `Index`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg(feature="clang_17_0")]
+pub struct IndexOptions {
+    /// An enumerator indicating the indexing priority policy.
+    pub thread_background_priority_for_indexing: Choice,
+    /// An enumerator indicating the editing priority policy.
+    pub thread_background_priority_for_editing: Choice,
+    /// Specifies if declarations in precompiled headers should be ignored.
+    pub exclude_declarations_from_pch: bool,
+    /// Specifies if diagnostics should be displayed.
+    pub display_diagnostics: bool,
+    /// Specifies if precompiled headers should be stored in memory.
+    pub store_preambles_in_memory: bool,
+    /// Path to directory where temporary precompiled headers should be stored.
+    /// Ignored if `store_preambles_in_memory` is `true`.
+    pub preamble_storage_path: Option<CString>,
+    /// Path to a directory where certain `libclang` invocations will place logs.
+    pub invocation_emission_path: Option<CString>,
+}
+
+#[cfg(feature="clang_17_0")]
+impl IndexOptions {
+    //- Constructors -----------------------------
+
+    /// Constructs a new `IndexOptions`.
+    pub fn new(
+        thread_background_priority_for_indexing: Choice,
+        thread_background_priority_for_editing: Choice,
+        exclude_declarations_from_pch: bool,
+        display_diagnostics: bool,
+        store_preambles_in_memory: bool,
+        preamble_storage_path: Option<&Path>,
+        invocation_emission_path: Option<&Path>
+    ) -> IndexOptions {
+        IndexOptions {
+            thread_background_priority_for_indexing,
+            thread_background_priority_for_editing,
+            exclude_declarations_from_pch,
+            display_diagnostics,
+            store_preambles_in_memory,
+            preamble_storage_path: preamble_storage_path.map(utility::from_path),
+            invocation_emission_path: invocation_emission_path.map(utility::from_path)
+        }
+    }
+
+    //- Accessors --------------------------------
+
+    fn as_raw(&self) -> CXIndexOptions {
+        let mut flags = 0;
+        
+        if self.exclude_declarations_from_pch {
+            flags |= CXIndexOptions_ExcludeDeclarationsFromPCH;
+        }
+
+        if self.display_diagnostics {
+            flags |= CXIndexOptions_DisplayDiagnostics;
+        }
+
+        if self.store_preambles_in_memory {
+            flags |= CXIndexOptions_StorePreamblesInMemory;
+        }
+
+        CXIndexOptions {
+            Size: mem::size_of::<CXIndexOptions>() as c_uint,
+            ThreadBackgroundPriorityForIndexing: self.thread_background_priority_for_indexing as c_uchar,
+            ThreadBackgroundPriorityForEditing: self.thread_background_priority_for_editing as c_uchar,
+            flags,
+            PreambleStoragePath: self.preamble_storage_path.as_ref().map_or_else(ptr::null, |s| s.as_ptr()),
+            InvocationEmissionPath: self.invocation_emission_path.as_ref().map_or_else(ptr::null, |s| s.as_ptr()),
+        }
     }
 }
 

@@ -337,8 +337,8 @@ fn test() {
         assert_eq!(children.len(), 2);
 
         assert_eq!(children[0].get_bit_field_width(), None);
-        assert_eq!(children[0].get_name(), None);
-        assert_eq!(children[0].get_display_name(), None);
+        assert!(children[0].get_name().is_some_and(|n| n.starts_with("(anonymous struct at ")));
+        assert!(children[0].get_display_name().is_some_and(|n| n.starts_with("(anonymous struct at ")));
         assert!(!children[0].is_bit_field());
 
         if !cfg!(target_os="windows") {
@@ -437,6 +437,38 @@ fn test() {
         assert_eq!(last.get_file(), tu.get_file(&fs[0]));
 
         assert_eq!(tu.get_file(&fs[1]).unwrap().get_includes(), &[last]);
+    });
+
+    with_temporary_files(files, |_, fs| {
+        #[cfg(feature="clang_17_0")]
+        fn test_index_with_options(clang: &Clang, fs: &[PathBuf]) {
+            let options = IndexOptions::new(
+                Choice::Enabled,
+                Choice::Disabled,
+                true,
+                false,
+                true,
+                None,
+                None
+            );
+
+            let index = Index::new_with_options(&clang, &options);
+            assert!(index.get_thread_options().indexing);
+            assert!(!index.get_thread_options().editing);
+
+            let tu = index.parser(&fs[1]).detailed_preprocessing_record(true).parse().unwrap();
+
+            let last = tu.get_entity().get_children().iter().last().unwrap().clone();
+            assert_eq!(last.get_kind(), EntityKind::InclusionDirective);
+            assert_eq!(last.get_file(), tu.get_file(&fs[0]));
+
+            assert_eq!(tu.get_file(&fs[1]).unwrap().get_includes(), &[last]);
+        }
+
+        #[cfg(not(feature="clang_17_0"))]
+        fn test_index_with_options(_clang: &Clang, _fs: &[PathBuf]) {}
+
+        test_index_with_options(&clang, &fs[..]);
     });
 
     let source = "
@@ -800,6 +832,34 @@ fn test() {
 
         assert!(!children[1].is_dynamic_call());
         assert!(children[2].is_dynamic_call());
+    });
+
+    let source = "
+        class A {
+            A(int b);
+            operator int();
+
+            explicit A(float b);
+            explicit operator float();
+        }
+    ";
+
+    with_entity(&clang, source, |e| {
+        #[cfg(feature="clang_17_0")]
+        fn test_is_explicit(children: &[Entity]) {
+            assert!(!children[0].is_explicit());
+            assert!(!children[1].is_explicit());
+            assert!(children[2].is_explicit());
+            assert!(children[3].is_explicit());
+        }
+
+        #[cfg(not(feature="clang_17_0"))]
+        fn test_is_explicit(_: &[Entity]) { }
+
+        let children = e.get_children()[0].get_children();
+        assert_eq!(children.len(), 4);
+
+        test_is_explicit(&children[..]);
     });
 
     let source = r#"
